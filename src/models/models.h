@@ -863,6 +863,11 @@ struct llama_model_gemma3n : public llama_model_base {
 
 struct llama_model_gemma4 : public llama_model_base {
     llama_model_gemma4(const struct llama_model_params & params) : llama_model_base(params) {}
+
+    // --lazy-mode on-direct: pread() the lazy per-layer table rows
+    // host-side instead of faulting them in through the mmap; see gemma4.cpp
+    const llama_lazy_reader * ple_reader = nullptr;
+
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
@@ -2384,6 +2389,10 @@ struct llama_model_qwen4exp : public llama_model_base {
 
     class llm_graph_input_qsa;
 
+    // --lazy-mode on-direct: pread() the lazy PLE table rows
+    // host-side instead of faulting them in through the mmap; see qwen4exp.cpp
+    const llama_lazy_reader * ple_reader = nullptr;
+
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
 
@@ -2421,8 +2430,10 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * k_cur,
                     ggml_tensor * v_cur,
                     ggml_tensor * top_k,
+                    ggml_tensor * qsa_bias,
                           float   kq_scale,
-                            int   il);
+                            int   il,
+                           bool   gather = false);
 
         // the QSA cache layout inputs do not depend on the layer, only on its compress ratio,
         // so the layers sharing a ratio share one input set
@@ -2435,7 +2446,8 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * inp_pos,
                     ggml_tensor * kq_mask,
                             int * sections,
-                            int   il);
+                            int   il,
+                           bool   gather = false);
 
         ggml_tensor * build_layer_attn_linear(
              llm_graph_input_rs * inp,
