@@ -1068,7 +1068,7 @@ void llama_memory_hybrid_idx::set_input_qsa(
                 continue;
             }
 
-            if (cells.seq_has((uint32_t) bid_cell[t], seq_of_stream)) {
+            if (one_seq || cells.seq_has((uint32_t) bid_cell[t], seq_of_stream)) {
                 blk_entry[pb] = t;
             }
         }
