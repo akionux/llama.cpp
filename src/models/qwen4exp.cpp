@@ -690,8 +690,12 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
                 idx_dim, store->ne[1], store->nb[1], 0);
         ggml_build_forward_expand(gf, ggml_set_rows(ctx0, store_view, fresh, inp->dirty_rows));
 
+        // [TAG_QSA_OWNROW] score only this sequence own rows: the store holds one window per
+        // sequence, and a dense matmul over all of it would mix another sequence summaries in
+        const int64_t pooled_base = mctx_hyb->pooled_row_base(ubatch.seq_id[0][0]);
+
         pooled = ggml_view_3d(ctx0, store, idx_dim, n_blocks, 1,
-                store->nb[1], store->nb[1]*n_blocks, 0);
+                store->nb[1], store->nb[1]*n_blocks, pooled_base*store->nb[1]);
         cb(pooled, "indexer_k", il);
     } else {
         // gathers per stream: blk_cells row s indexes stream s's own cells

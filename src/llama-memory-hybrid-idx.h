@@ -101,10 +101,23 @@ public:
     // it and replay recomputes the range. Rows at or beyond the watermark may hold stale but
     // finite data and are masked by the -inf bias. Single-stream memories only.
     ggml_tensor * get_pooled_k(int32_t il) const;              // nullptr: no indexer / multi-stream
-    uint32_t get_pooled_rows() const { return pooled_rows; }   // rows per stream, incl. trailing dustbin row
+    uint32_t get_pooled_rows() const { return pooled_rows; }   // total rows: one window per sequence
+
+    uint32_t get_pooled_rows_per_seq() const { return pooled_rows_per_seq; }
+
+    // [TAG_QSA_OWNROW] seq_id rows live in [pooled_row_base(seq), +pooled_rows_per_seq). One
+    // window per sequence, so two sequences of a unified stream never score each other pools.
+    int64_t pooled_row_base(llama_seq_id seq_id) const {
+        return (int64_t) ((uint32_t) seq_id % pooled_n_seq_max) * (int64_t) pooled_rows_per_seq;
+    }
 
     // blocks of seq_id whose pooled rows are known valid; mutable like a cache's bookkeeping
     int64_t & pooled_valid(llama_seq_id seq_id) const;
+
+    // [TAG_QSA_SIZING] largest cell index the indexer cache of seq_id's stream holds: the fill
+    // counts complete blocks over that whole array (every sequence sharing it when the KV cache
+    // is unified), so the dirty tables have to cover it, not just one ubatch's positions.
+    int64_t qsa_stream_idx_max(llama_seq_id seq_id) const;
 
 private:
     // forget seq_id (all of it if seq_id < 0) in every cache at once, so a failed restore cannot leave the caches out of step
@@ -124,10 +137,22 @@ private:
     std::vector<ggml_backend_buffer_ptr> pooled_bufs;
     std::map<int32_t, ggml_tensor *> pooled_k;
 
-    uint32_t pooled_rows  = 0;
-    uint32_t pooled_ratio = 0;
+    uint32_t pooled_rows         = 0;   // total rows: pooled_rows_per_seq * pooled_n_seq_max
+    uint32_t pooled_rows_per_seq = 0;   // rows per sequence, incl. the trailing dustbin row
+    uint32_t pooled_n_seq_max    = 1;
+    uint32_t pooled_ratio        = 0;
 
     mutable std::unordered_map<llama_seq_id, int64_t> pooled_w;
+
+    // [TAG_QSA_GUARD] pooled rows are shared by every sequence of a unified cache while pooled_w
+    // is per sequence, and the fill may pool blocks this ubatch never brought ([TAG_QSA_SIZING]
+    // counts the stream inventory). Remember which sequence wrote a row so an overwrite of a row
+    // another sequence still certifies can be reported instead of silently scoring wrong keys.
+    mutable std::unordered_map<int64_t, llama_seq_id> pooled_row_owner;
+    mutable int64_t pooled_guard_reports = 0;
+    mutable int64_t pooled_guard_info    = 0;
+    mutable int64_t pooled_bias_reports  = 0;
+    mutable int64_t pooled_window_logged = -1;
 
     // clamp helpers, one per llama_memory_i operation that can invalidate rows
     void pooled_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
@@ -194,6 +219,8 @@ public:
     ggml_tensor * get_pooled_k(int32_t il) const;
 
     uint32_t get_pooled_rows() const;
+
+    int64_t pooled_row_base(llama_seq_id seq_id) const;   // [TAG_QSA_OWNROW]
 
     // capacity the dirty tables need for this ubatch: completed blocks plus pending refill
     // below the watermark; stable at 1 during steady decode so graph reuse holds
