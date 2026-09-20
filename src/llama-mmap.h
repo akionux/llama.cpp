@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 #include <cstdio>
@@ -22,8 +21,6 @@ struct llama_file {
 
     size_t tell() const;
     size_t size() const;
-
-    const std::string & name() const; // path this file was opened from
 
     int file_id() const; // fileno overload
 
