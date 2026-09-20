@@ -50,8 +50,9 @@ static int next_power_of_2(int x) {
 
 #endif                            // CUB_TOP_K_AVAILABLE
 
-// radix-select top-k: used by HIP for wide rows and by CUB builds without DeviceTopK (CCCL < 3.2)
-#if !defined(CUB_TOP_K_AVAILABLE) && (defined(GGML_CUDA_USE_CUB) || defined(GGML_USE_HIP))
+#define GGML_CUDA_TOP_K_RADIX
+
+#ifdef GGML_CUDA_TOP_K_RADIX
 
 static __device__ __forceinline__ uint32_t top_k_float_to_ordered(float value) {
     const uint32_t bits = __float_as_uint(value);
@@ -211,7 +212,17 @@ static void top_k_radix_cuda(
             src, dst, states, ncols, k, blocks_per_row);
 }
 
-#endif // !defined(CUB_TOP_K_AVAILABLE) && (defined(GGML_CUDA_USE_CUB) || defined(GGML_USE_HIP))
+// nrows above which grid-over-rows radix select beats a per-row loop; env-tunable for sweeps
+static int top_k_radix_min_rows() {
+    static int v = -1;
+    if (v < 0) {
+        const char * e = getenv("GGML_CUDA_TOPK_RADIX_MIN_ROWS");
+        v = e ? atoi(e) : 8;
+    }
+    return v;
+}
+
+#endif // GGML_CUDA_TOP_K_RADIX
 
 void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0   = dst->src[0];
@@ -232,8 +243,12 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     // TODO: Switch to `DeviceSegmentedTopK` for multi-row TopK once implemented
     // https://github.com/NVIDIA/cccl/issues/6391
     // TODO: investigate if there exists a point where parallelized argsort is faster than sequential top-k
-    for (int i = 0; i < nrows; i++) {
-        top_k_cub(pool, src0_d + i * ncols, dst_d + i * k, ncols, k, stream);
+    if (nrows >= top_k_radix_min_rows() && ncols > 1024) {
+        top_k_radix_cuda(pool, src0_d, dst_d, ncols, nrows, k, stream);
+    } else {
+        for (int i = 0; i < nrows; i++) {
+            top_k_cub(pool, src0_d + i * ncols, dst_d + i * k, ncols, k, stream);
+        }
     }
 #elif defined(GGML_CUDA_USE_CUB)  // CUB_TOP_K_AVAILABLE
     // No DeviceTopK in this CCCL. Sorting every key of every row and copying the first k is expensive for wide rows,
@@ -241,7 +256,7 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     // the segmented sort was still faster at 4096 columns and the radix-select faster from 8192 columns on.
     // GGML_CUDA_TOPK_ARGSORT=1 forces the argsort path (for A/B comparisons within one binary).
     static const bool force_argsort = getenv("GGML_CUDA_TOPK_ARGSORT") != nullptr && atoi(getenv("GGML_CUDA_TOPK_ARGSORT")) != 0;
-    if (!force_argsort && ncols >= 8192) {
+    if (!force_argsort && nrows >= top_k_radix_min_rows() && ncols >= 8192) {
         top_k_radix_cuda(pool, src0_d, dst_d, ncols, nrows, k, stream);
         return;
     }
